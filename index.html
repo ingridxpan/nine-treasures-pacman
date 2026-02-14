@@ -1,0 +1,1660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Pacman: Nine Treasures Creamery x OpenAI</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  background: #000;
+  overflow: hidden;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#gameCanvas {
+  display: block;
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// ==========================================
+// CONSTANTS & CONFIG
+// ==========================================
+const TILE = 16;
+const COLS = 21;
+const ROWS = 17;
+const MAZE_W = COLS * TILE;       // 448
+const MAZE_H = ROWS * TILE;       // 496
+const HUD_TOP = 40;
+const HUD_BOT = 40;
+const CANVAS_W = MAZE_W;
+const CANVAS_H = MAZE_H + HUD_TOP + HUD_BOT;
+const FRAME_TIME = 1000 / 60;
+
+const COLORS = {
+  pacman: '#00FFFF',
+  ghostPink: '#FFB6C1',
+  ghostPeach: '#FFDAB9',
+  ghostMint: '#98FF98',
+  ghostYellow: '#FFFACD',
+  ghostFrightened: '#0000FF',
+  ghostFrightenedFlash: '#FFFFFF',
+  ghostEyes: '#FFFFFF',
+  ghostPupil: '#0000FF',
+  wall: '#1E90FF',
+  dot: '#FFFFFF',
+  powerPill: '#FFD700',
+  background: '#000000',
+  text: '#FFFFFF',
+  textCyan: '#00FFFF',
+};
+
+// Game states
+const STATE = {
+  LOGO: 'LOGO',
+  SPLASH: 'SPLASH',
+  EXPLAINER: 'EXPLAINER',
+  READY: 'READY',
+  PLAYING: 'PLAYING',
+  PACMAN_DEATH: 'PACMAN_DEATH',
+  LEVEL_COMPLETE: 'LEVEL_COMPLETE',
+  GAME_OVER: 'GAME_OVER',
+  WIN: 'WIN',
+  CREDITS: 'CREDITS',
+  END: 'END',
+};
+
+// Directions
+const DIR = {
+  NONE: -1,
+  UP: 0,
+  LEFT: 1,
+  DOWN: 2,
+  RIGHT: 3,
+};
+
+const DIR_VEC = {
+  [DIR.UP]: { x: 0, y: -1 },
+  [DIR.LEFT]: { x: -1, y: 0 },
+  [DIR.DOWN]: { x: 0, y: 1 },
+  [DIR.RIGHT]: { x: 1, y: 0 },
+};
+
+const OPPOSITE = {
+  [DIR.UP]: DIR.DOWN,
+  [DIR.DOWN]: DIR.UP,
+  [DIR.LEFT]: DIR.RIGHT,
+  [DIR.RIGHT]: DIR.LEFT,
+};
+
+// Ghost modes
+const GHOST_MODE = {
+  SCATTER: 'SCATTER',
+  CHASE: 'CHASE',
+  FRIGHTENED: 'FRIGHTENED',
+  EATEN: 'EATEN',
+  HOUSE: 'HOUSE',
+  LEAVING: 'LEAVING',
+};
+
+// Tile types
+const T = {
+  EMPTY: 0,
+  WALL: 1,
+  DOT: 2,
+  POWER: 3,
+  GHOST_HOUSE: 4,
+  GHOST_DOOR: 5,
+  TUNNEL: 6,
+};
+
+// ==========================================
+// LEVEL 1 MAZE: Black Sesame Cookies & Cream
+// ==========================================
+// Classic Pacman-inspired layout
+// 1=wall, 2=dot, 3=power pill, 0=empty, 4=ghost house, 5=ghost door, 6=tunnel
+const MAZE_STRINGS = [
+  '111111111111111111111',
+  '132222222222222222231',
+  '121211122222221121121',
+  '122222222222222222221',
+  '121222211151112222121',
+  '122222210444102222221',
+  '600000010444100000006',
+  '122222210444102222221',
+  '121222211111112222121',
+  '122222222222222222221',
+  '121211122222221121121',
+  '132222222222222222231',
+  '121222211111112222121',
+  '122222222222222222221',
+  '121222222222222222121',
+  '122222222222222222221',
+  '111111111111111111111',
+];
+
+function parseMaze(strings) {
+  return strings.map(row => row.split('').map(Number));
+}
+
+// ==========================================
+// CANVAS SETUP
+// ==========================================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = CANVAS_W;
+canvas.height = CANVAS_H;
+
+// Load logo image
+const logoImg = new Image();
+logoImg.src = 'kim2.png';
+
+function resizeCanvas() {
+  const scaleX = window.innerWidth / CANVAS_W;
+  const scaleY = window.innerHeight / CANVAS_H;
+  const scale = Math.min(scaleX, scaleY);
+  canvas.style.width = (CANVAS_W * scale) + 'px';
+  canvas.style.height = (CANVAS_H * scale) + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// Convert screen coords to canvas coords
+function screenToCanvas(sx, sy) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (sx - rect.left) * (CANVAS_W / rect.width),
+    y: (sy - rect.top) * (CANVAS_H / rect.height),
+  };
+}
+
+// ==========================================
+// SOUND MANAGER (Web Audio API)
+// ==========================================
+class SoundManager {
+  constructor() {
+    this.ctx = null;
+    this.muted = false;
+  }
+  init() {
+    if (!this.ctx) {
+      try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch(e) { /* no audio */ }
+    }
+  }
+  play(type) {
+    if (this.muted || !this.ctx) return;
+    try {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      const t = this.ctx.currentTime;
+      switch(type) {
+        case 'chomp':
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(300, t);
+          osc.frequency.setValueAtTime(200, t + 0.05);
+          gain.gain.setValueAtTime(0.15, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+          osc.start(t); osc.stop(t + 0.1);
+          break;
+        case 'power':
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(500, t);
+          osc.frequency.linearRampToValueAtTime(800, t + 0.2);
+          gain.gain.setValueAtTime(0.15, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+          osc.start(t); osc.stop(t + 0.3);
+          break;
+        case 'eatghost':
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(200, t);
+          osc.frequency.linearRampToValueAtTime(600, t + 0.15);
+          gain.gain.setValueAtTime(0.15, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+          osc.start(t); osc.stop(t + 0.2);
+          break;
+        case 'death':
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(500, t);
+          osc.frequency.linearRampToValueAtTime(100, t + 0.8);
+          gain.gain.setValueAtTime(0.12, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
+          osc.start(t); osc.stop(t + 0.8);
+          break;
+        case 'levelcomplete':
+          osc.type = 'square';
+          [392, 523, 659, 784].forEach((f, i) => {
+            osc.frequency.setValueAtTime(f, t + i * 0.15);
+          });
+          gain.gain.setValueAtTime(0.15, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+          osc.start(t); osc.stop(t + 0.7);
+          break;
+        case 'start':
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(440, t);
+          osc.frequency.setValueAtTime(220, t + 0.1);
+          osc.frequency.setValueAtTime(440, t + 0.2);
+          gain.gain.setValueAtTime(0.12, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+          osc.start(t); osc.stop(t + 0.3);
+          break;
+      }
+    } catch(e) { /* ignore audio errors */ }
+  }
+}
+
+const sound = new SoundManager();
+
+// ==========================================
+// INPUT MANAGER
+// ==========================================
+class InputManager {
+  constructor() {
+    this.direction = DIR.NONE;
+    this.touchStartX = 0;
+    this.touchStartY = 0;
+    this.clickHandlers = [];
+    this._setupKeyboard();
+    this._setupTouch();
+  }
+  _setupKeyboard() {
+    window.addEventListener('keydown', (e) => {
+      switch(e.key) {
+        case 'ArrowUp': case 'w': case 'W': this.direction = DIR.UP; e.preventDefault(); break;
+        case 'ArrowDown': case 's': case 'S': this.direction = DIR.DOWN; e.preventDefault(); break;
+        case 'ArrowLeft': case 'a': case 'A': this.direction = DIR.LEFT; e.preventDefault(); break;
+        case 'ArrowRight': case 'd': case 'D': this.direction = DIR.RIGHT; e.preventDefault(); break;
+      }
+    });
+  }
+  _setupTouch() {
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.touches[0];
+      this.touchStartX = t.clientX;
+      this.touchStartY = t.clientY;
+    }, { passive: false });
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      if (e.changedTouches.length === 0) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - this.touchStartX;
+      const dy = t.clientY - this.touchStartY;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist < 20) {
+        // Tap — trigger click handlers
+        const pos = screenToCanvas(t.clientX, t.clientY);
+        this.clickHandlers.forEach(h => h(pos.x, pos.y));
+        return;
+      }
+      if (Math.abs(dx) > Math.abs(dy)) {
+        this.direction = dx > 0 ? DIR.RIGHT : DIR.LEFT;
+      } else {
+        this.direction = dy > 0 ? DIR.DOWN : DIR.UP;
+      }
+    }, { passive: false });
+    canvas.addEventListener('click', (e) => {
+      const pos = screenToCanvas(e.clientX, e.clientY);
+      this.clickHandlers.forEach(h => h(pos.x, pos.y));
+    });
+  }
+  onClickOrTap(handler) {
+    this.clickHandlers.push(handler);
+  }
+  consumeDirection() {
+    const d = this.direction;
+    this.direction = DIR.NONE;
+    return d;
+  }
+  peekDirection() {
+    return this.direction;
+  }
+}
+
+const input = new InputManager();
+
+// ==========================================
+// SPRITE RENDERER
+// ==========================================
+const Sprites = {
+  drawPacman(ctx, x, y, size, direction, mouthAngle) {
+    ctx.save();
+    ctx.translate(x, y);
+    let rot = 0;
+    switch(direction) {
+      case DIR.RIGHT: rot = 0; break;
+      case DIR.DOWN: rot = Math.PI / 2; break;
+      case DIR.LEFT: rot = Math.PI; break;
+      case DIR.UP: rot = -Math.PI / 2; break;
+    }
+    ctx.rotate(rot);
+    ctx.fillStyle = COLORS.pacman;
+    ctx.beginPath();
+    ctx.arc(0, 0, size / 2, mouthAngle, 2 * Math.PI - mouthAngle);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  },
+
+  drawGhost(ctx, x, y, size, color, mode, direction, frame) {
+    ctx.save();
+    ctx.translate(x, y);
+    const r = size / 2;
+    const bodyColor = mode === GHOST_MODE.FRIGHTENED
+      ? (frame % 30 < 15 ? COLORS.ghostFrightened : COLORS.ghostFrightenedFlash)
+      : mode === GHOST_MODE.EATEN ? 'transparent' : color;
+
+    if (bodyColor !== 'transparent') {
+      // Ghost body
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.arc(0, -r * 0.2, r, Math.PI, 0);
+      ctx.lineTo(r, r);
+      // Wavy bottom
+      const waves = 3;
+      const waveW = (2 * r) / waves;
+      for (let i = 0; i < waves; i++) {
+        const wx = r - i * waveW;
+        const waveOffset = (frame % 20 < 10) ? 0 : waveW / 2;
+        ctx.quadraticCurveTo(
+          wx - waveW * 0.25, r - 4 + (i % 2 === 0 ? 3 : -3),
+          wx - waveW, r
+        );
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Eyes
+    if (mode !== GHOST_MODE.FRIGHTENED || bodyColor === COLORS.ghostFrightenedFlash) {
+      const eyeSize = r * 0.35;
+      const pupilSize = r * 0.2;
+      const eyeY = -r * 0.3;
+      const eyeSpacing = r * 0.45;
+
+      // Eye direction offset
+      let pdx = 0, pdy = 0;
+      switch(direction) {
+        case DIR.LEFT: pdx = -pupilSize * 0.5; break;
+        case DIR.RIGHT: pdx = pupilSize * 0.5; break;
+        case DIR.UP: pdy = -pupilSize * 0.5; break;
+        case DIR.DOWN: pdy = pupilSize * 0.5; break;
+      }
+
+      [-eyeSpacing, eyeSpacing].forEach(ex => {
+        ctx.fillStyle = COLORS.ghostEyes;
+        ctx.beginPath();
+        ctx.arc(ex, eyeY, eyeSize, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = mode === GHOST_MODE.EATEN ? COLORS.ghostPupil : '#000';
+        ctx.beginPath();
+        ctx.arc(ex + pdx, eyeY + pdy, pupilSize, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    // Frightened face (mouth)
+    if (mode === GHOST_MODE.FRIGHTENED && bodyColor !== 'transparent') {
+      ctx.strokeStyle = '#FFF';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const mouthY = r * 0.2;
+      for (let i = -3; i <= 3; i++) {
+        const mx = i * (r / 3);
+        const my = mouthY + (i % 2 === 0 ? 2 : -2);
+        if (i === -3) ctx.moveTo(mx, my);
+        else ctx.lineTo(mx, my);
+      }
+      ctx.stroke();
+
+      // Simple white eyes for frightened
+      ctx.fillStyle = '#FFF';
+      [-r * 0.3, r * 0.3].forEach(ex => {
+        ctx.fillRect(ex - 1.5, -r * 0.4, 3, 3);
+      });
+    }
+
+    ctx.restore();
+  },
+
+  drawIceCream(ctx, x, y, size, scoopColor) {
+    ctx.save();
+    ctx.translate(x, y);
+    const r = size * 0.35;
+    // Cone
+    ctx.fillStyle = '#DEB887';
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.7, 0);
+    ctx.lineTo(0, size * 0.45);
+    ctx.lineTo(r * 0.7, 0);
+    ctx.closePath();
+    ctx.fill();
+    // Cup (cyan)
+    ctx.fillStyle = '#00FFFF';
+    ctx.fillRect(-r * 0.8, -2, r * 1.6, 5);
+    // Scoop
+    ctx.fillStyle = scoopColor;
+    ctx.beginPath();
+    ctx.arc(0, -r * 0.3, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  },
+
+  drawSparkle(ctx, x, y, size, frame) {
+    ctx.save();
+    ctx.translate(x, y);
+    const pulse = 1 + 0.2 * Math.sin(frame * 0.15);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = COLORS.powerPill;
+    // 4-pointed star
+    const r = size / 2;
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = (i * Math.PI) / 4;
+      const dist = i % 2 === 0 ? r : r * 0.35;
+      ctx.lineTo(Math.cos(angle) * dist, Math.sin(angle) * dist);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Glow
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  },
+};
+
+// ==========================================
+// MAZE RENDERER
+// ==========================================
+function drawMaze(ctx, maze, frame) {
+  const offsetY = HUD_TOP;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const tile = maze[r][c];
+      const x = c * TILE;
+      const y = r * TILE + offsetY;
+      switch(tile) {
+        case T.WALL:
+          drawWallTile(ctx, maze, r, c, x, y);
+          break;
+        case T.DOT:
+          ctx.fillStyle = COLORS.dot;
+          ctx.beginPath();
+          ctx.arc(x + TILE/2, y + TILE/2, 2, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        case T.POWER:
+          Sprites.drawSparkle(ctx, x + TILE/2, y + TILE/2, TILE * 0.8, frame);
+          break;
+        case T.GHOST_DOOR:
+          ctx.fillStyle = '#FFB8FF';
+          ctx.fillRect(x, y + TILE/2 - 1, TILE, 3);
+          break;
+      }
+    }
+  }
+}
+
+function drawWallTile(ctx, maze, r, c, x, y) {
+  ctx.fillStyle = COLORS.wall;
+  // Simple but effective wall drawing using rounded rects
+  const m = 1; // margin
+  const isWall = (rr, cc) => {
+    if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) return true;
+    return maze[rr][cc] === T.WALL;
+  };
+
+  const up = isWall(r-1, c);
+  const down = isWall(r+1, c);
+  const left = isWall(r, c-1);
+  const right = isWall(r, c+1);
+
+  // Draw wall segments that connect to neighbors
+  ctx.strokeStyle = COLORS.wall;
+  ctx.lineWidth = 2;
+
+  const cx = x + TILE/2;
+  const cy = y + TILE/2;
+
+  // Draw connecting lines
+  ctx.beginPath();
+  if (!up && !down && !left && !right) {
+    // Isolated wall block
+    ctx.strokeRect(x + 3, y + 3, TILE - 6, TILE - 6);
+  } else {
+    if (up) { ctx.moveTo(cx, cy); ctx.lineTo(cx, y); }
+    if (down) { ctx.moveTo(cx, cy); ctx.lineTo(cx, y + TILE); }
+    if (left) { ctx.moveTo(cx, cy); ctx.lineTo(x, cy); }
+    if (right) { ctx.moveTo(cx, cy); ctx.lineTo(x + TILE, cy); }
+  }
+  ctx.stroke();
+
+  // Draw rounded corners where appropriate
+  const radius = 4;
+  ctx.beginPath();
+  if (!up && !left && right && down) {
+    ctx.arc(x + TILE, y + TILE, radius, Math.PI, Math.PI * 1.5);
+  }
+  if (!up && !right && left && down) {
+    ctx.arc(x, y + TILE, radius, Math.PI * 1.5, Math.PI * 2);
+  }
+  if (!down && !left && right && up) {
+    ctx.arc(x + TILE, y, radius, Math.PI * 0.5, Math.PI);
+  }
+  if (!down && !right && left && up) {
+    ctx.arc(x, y, radius, 0, Math.PI * 0.5);
+  }
+  ctx.stroke();
+}
+
+// ==========================================
+// PACMAN CLASS
+// ==========================================
+class Pacman {
+  constructor() {
+    this.reset();
+  }
+  reset() {
+    // Starting position (center bottom area of maze)
+    this.tileX = 10;
+    this.tileY = 13;
+    this.pixelX = this.tileX * TILE + TILE/2;
+    this.pixelY = this.tileY * TILE + TILE/2;
+    this.direction = DIR.LEFT;
+    this.nextDirection = DIR.NONE;
+    this.speed = 2;
+    this.animFrame = 0;
+    this.animTimer = 0;
+    this.moving = false;
+    this.alive = true;
+    this.deathFrame = 0;
+  }
+  update(maze) {
+    if (!this.alive) {
+      this.deathFrame++;
+      return;
+    }
+
+    this.animTimer++;
+    if (this.animTimer % 3 === 0) this.animFrame = (this.animFrame + 1) % 4;
+
+    const inputDir = input.peekDirection();
+    if (inputDir !== DIR.NONE) {
+      this.nextDirection = inputDir;
+    }
+
+    // Try to change direction at tile center
+    const atCenterX = Math.abs(this.pixelX - (this.tileX * TILE + TILE/2)) < this.speed;
+    const atCenterY = Math.abs(this.pixelY - (this.tileY * TILE + TILE/2)) < this.speed;
+
+    if (atCenterX && atCenterY) {
+      // Snap to center
+      this.pixelX = this.tileX * TILE + TILE/2;
+      this.pixelY = this.tileY * TILE + TILE/2;
+
+      // Try nextDirection first
+      if (this.nextDirection !== DIR.NONE && this.canMove(this.nextDirection, maze)) {
+        this.direction = this.nextDirection;
+        this.nextDirection = DIR.NONE;
+        input.direction = DIR.NONE;
+      }
+
+      if (!this.canMove(this.direction, maze)) {
+        this.moving = false;
+        return;
+      }
+    }
+
+    // Move in current direction
+    if (this.canMovePixel(this.direction, maze)) {
+      const vec = DIR_VEC[this.direction];
+      this.pixelX += vec.x * this.speed;
+      this.pixelY += vec.y * this.speed;
+      this.moving = true;
+
+      // Update tile position
+      this.tileX = Math.floor(this.pixelX / TILE);
+      this.tileY = Math.floor(this.pixelY / TILE);
+
+      // Tunnel wrap
+      if (this.tileX < 0) {
+        this.tileX = COLS - 1;
+        this.pixelX = this.tileX * TILE + TILE/2;
+      } else if (this.tileX >= COLS) {
+        this.tileX = 0;
+        this.pixelX = this.tileX * TILE + TILE/2;
+      }
+    } else {
+      this.moving = false;
+    }
+  }
+  canMove(dir, maze) {
+    const vec = DIR_VEC[dir];
+    let nx = this.tileX + vec.x;
+    let ny = this.tileY + vec.y;
+    // Tunnel
+    if (nx < 0) nx = COLS - 1;
+    if (nx >= COLS) nx = 0;
+    if (ny < 0 || ny >= ROWS) return false;
+    const tile = maze[ny][nx];
+    return tile !== T.WALL && tile !== T.GHOST_DOOR;
+  }
+  canMovePixel(dir, maze) {
+    const vec = DIR_VEC[dir];
+    const testX = this.pixelX + vec.x * this.speed;
+    const testY = this.pixelY + vec.y * this.speed;
+    let tx = Math.floor(testX / TILE);
+    let ty = Math.floor(testY / TILE);
+    if (tx < 0) return true; // tunnel
+    if (tx >= COLS) return true;
+    if (ty < 0 || ty >= ROWS) return false;
+    const tile = maze[ty][tx];
+    return tile !== T.WALL && tile !== T.GHOST_DOOR;
+  }
+  draw(ctx) {
+    const sx = this.pixelX;
+    const sy = this.pixelY + HUD_TOP;
+    if (!this.alive) {
+      // Death animation
+      const progress = Math.min(this.deathFrame / 60, 1);
+      const mouthAngle = progress * Math.PI;
+      ctx.save();
+      ctx.globalAlpha = 1 - progress;
+      Sprites.drawPacman(ctx, sx, sy, TILE, this.direction, mouthAngle);
+      ctx.restore();
+      return;
+    }
+    // Mouth animation: 0→0.1, 1→0.25, 2→0.45, 3→0.25
+    const mouthAngles = [0.1, 0.25, 0.45, 0.25];
+    const mouth = this.moving ? mouthAngles[this.animFrame] : 0.1;
+    Sprites.drawPacman(ctx, sx, sy, TILE, this.direction, mouth);
+  }
+}
+
+// ==========================================
+// GHOST CLASS
+// ==========================================
+class Ghost {
+  constructor(name, color, scatterTarget, startTileX, startTileY) {
+    this.name = name;
+    this.color = color;
+    this.scatterTarget = scatterTarget;
+    this.startTileX = startTileX;
+    this.startTileY = startTileY;
+    this.dotLimit = 0; // dots eaten before this ghost leaves
+    this.reset();
+  }
+  reset() {
+    this.tileX = this.startTileX;
+    this.tileY = this.startTileY;
+    this.pixelX = this.tileX * TILE + TILE/2;
+    this.pixelY = this.tileY * TILE + TILE/2;
+    this.direction = DIR.UP;
+    this.mode = GHOST_MODE.HOUSE;
+    this.speed = 1.5;
+    this.baseSpeed = 1.5;
+    this.frightenedTimer = 0;
+    this.animFrame = 0;
+    this.target = { x: 0, y: 0 };
+    this.leftHouse = false;
+  }
+  getChaseTarget(pacman, blinkyGhost) {
+    switch(this.name) {
+      case 'Confab': // Blinky: target Pacman directly
+        return { x: pacman.tileX, y: pacman.tileY };
+      case 'Drift': { // Pinky: target 4 tiles ahead
+        const vec = DIR_VEC[pacman.direction] || { x: 0, y: -1 };
+        return { x: pacman.tileX + vec.x * 4, y: pacman.tileY + vec.y * 4 };
+      }
+      case 'Bias': { // Inky: use Blinky + Pacman
+        const vec = DIR_VEC[pacman.direction] || { x: 0, y: -1 };
+        const ax = pacman.tileX + vec.x * 2;
+        const ay = pacman.tileY + vec.y * 2;
+        if (blinkyGhost) {
+          return { x: ax + (ax - blinkyGhost.tileX), y: ay + (ay - blinkyGhost.tileY) };
+        }
+        return { x: pacman.tileX, y: pacman.tileY };
+      }
+      case 'Psychosis': { // Clyde: chase when far, scatter when close
+        const dist = Math.sqrt((pacman.tileX - this.tileX)**2 + (pacman.tileY - this.tileY)**2);
+        if (dist > 8) return { x: pacman.tileX, y: pacman.tileY };
+        return this.scatterTarget;
+      }
+    }
+    return { x: pacman.tileX, y: pacman.tileY };
+  }
+  update(maze, pacman, blinkyGhost, globalMode) {
+    this.animFrame++;
+
+    if (this.mode === GHOST_MODE.HOUSE) {
+      // Bob up and down in house
+      this.pixelY = this.startTileY * TILE + TILE/2 + Math.sin(this.animFrame * 0.1) * 3;
+      return;
+    }
+
+    if (this.mode === GHOST_MODE.LEAVING) {
+      // Move to exit point above ghost door
+      const exitX = 10 * TILE + TILE/2;
+      const exitY = 4 * TILE + TILE/2;
+      const dx = exitX - this.pixelX;
+      const dy = exitY - this.pixelY;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist < 3) {
+        this.pixelX = exitX;
+        this.pixelY = exitY;
+        this.tileX = Math.floor(this.pixelX / TILE);
+        this.tileY = Math.floor(this.pixelY / TILE);
+        this.mode = globalMode;
+        this.direction = DIR.LEFT;
+        this.leftHouse = true;
+        return;
+      }
+      this.pixelX += (dx / dist) * 2;
+      this.pixelY += (dy / dist) * 2;
+      this.tileX = Math.floor(this.pixelX / TILE);
+      this.tileY = Math.floor(this.pixelY / TILE);
+      return;
+    }
+
+    if (this.mode === GHOST_MODE.FRIGHTENED) {
+      this.frightenedTimer--;
+      if (this.frightenedTimer <= 0) {
+        this.mode = globalMode;
+        this.speed = this.baseSpeed;
+      }
+    }
+
+    if (this.mode === GHOST_MODE.EATEN) {
+      // Head back to ghost house
+      this.speed = this.baseSpeed * 2;
+      this.target = { x: 10, y: 6 };
+      if (Math.abs(this.tileX - 10) <= 1 && Math.abs(this.tileY - 6) <= 1) {
+        this.mode = GHOST_MODE.LEAVING;
+        this.speed = this.baseSpeed;
+        this.pixelX = 10 * TILE + TILE/2;
+        this.pixelY = 6 * TILE + TILE/2;
+        this.tileX = 10;
+        this.tileY = 6;
+        return;
+      }
+    } else if (this.mode === GHOST_MODE.SCATTER) {
+      this.target = this.scatterTarget;
+    } else if (this.mode === GHOST_MODE.CHASE) {
+      this.target = this.getChaseTarget(pacman, blinkyGhost);
+    }
+
+    // Movement at tile centers
+    const atCenterX = Math.abs(this.pixelX - (this.tileX * TILE + TILE/2)) < this.speed;
+    const atCenterY = Math.abs(this.pixelY - (this.tileY * TILE + TILE/2)) < this.speed;
+
+    if (atCenterX && atCenterY) {
+      this.pixelX = this.tileX * TILE + TILE/2;
+      this.pixelY = this.tileY * TILE + TILE/2;
+
+      // Choose best direction
+      const bestDir = this.chooseBestDirection(maze);
+      if (bestDir !== DIR.NONE) {
+        this.direction = bestDir;
+      }
+    }
+
+    // Move
+    const vec = DIR_VEC[this.direction];
+    if (vec) {
+      this.pixelX += vec.x * this.speed;
+      this.pixelY += vec.y * this.speed;
+      this.tileX = Math.floor(this.pixelX / TILE);
+      this.tileY = Math.floor(this.pixelY / TILE);
+
+      // Tunnel wrap
+      if (this.tileX < 0) {
+        this.tileX = COLS - 1;
+        this.pixelX = this.tileX * TILE + TILE/2;
+      } else if (this.tileX >= COLS) {
+        this.tileX = 0;
+        this.pixelX = this.tileX * TILE + TILE/2;
+      }
+    }
+  }
+  chooseBestDirection(maze) {
+    const opposite = OPPOSITE[this.direction];
+    const dirs = [DIR.UP, DIR.LEFT, DIR.DOWN, DIR.RIGHT];
+    let bestDist = Infinity;
+    let bestDir = DIR.NONE;
+
+    for (const dir of dirs) {
+      if (dir === opposite) continue;
+      const vec = DIR_VEC[dir];
+      let nx = this.tileX + vec.x;
+      let ny = this.tileY + vec.y;
+
+      // Tunnel
+      if (nx < 0) nx = COLS - 1;
+      if (nx >= COLS) nx = 0;
+      if (ny < 0 || ny >= ROWS) continue;
+
+      const tile = maze[ny][nx];
+      if (tile === T.WALL) continue;
+      if (tile === T.GHOST_DOOR && this.mode !== GHOST_MODE.EATEN) continue;
+
+      if (this.mode === GHOST_MODE.FRIGHTENED) {
+        // Random direction when frightened
+        if (Math.random() < 0.25) return dir;
+        continue;
+      }
+
+      const dist = (nx - this.target.x)**2 + (ny - this.target.y)**2;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestDir = dir;
+      }
+    }
+
+    // Fallback for frightened mode
+    if (bestDir === DIR.NONE) {
+      for (const dir of dirs) {
+        if (dir === opposite) continue;
+        const vec = DIR_VEC[dir];
+        let nx = this.tileX + vec.x;
+        let ny = this.tileY + vec.y;
+        if (nx < 0) nx = COLS - 1;
+        if (nx >= COLS) nx = 0;
+        if (ny < 0 || ny >= ROWS) continue;
+        if (maze[ny][nx] !== T.WALL && (maze[ny][nx] !== T.GHOST_DOOR || this.mode === GHOST_MODE.EATEN)) {
+          return dir;
+        }
+      }
+    }
+
+    return bestDir;
+  }
+  setFrightened() {
+    if (this.mode === GHOST_MODE.HOUSE || this.mode === GHOST_MODE.LEAVING || this.mode === GHOST_MODE.EATEN) return;
+    this.mode = GHOST_MODE.FRIGHTENED;
+    this.frightenedTimer = 360; // 6 seconds
+    this.speed = this.baseSpeed * 0.5;
+    // Reverse direction
+    this.direction = OPPOSITE[this.direction] || this.direction;
+  }
+  draw(ctx) {
+    const sx = this.pixelX;
+    const sy = this.pixelY + HUD_TOP;
+    Sprites.drawGhost(ctx, sx, sy, TILE, this.color, this.mode, this.direction, this.animFrame);
+  }
+}
+
+// ==========================================
+// GAME STATE
+// ==========================================
+class Game {
+  constructor() {
+    this.state = STATE.LOGO;
+    this.logoTimer = 300; // 5 seconds at 60fps
+    this.score = 0;
+    this.highScore = parseInt(localStorage.getItem('pacmanNTC_high') || '0');
+    this.lives = 3;
+    this.level = 1;
+    this.levelName = 'Black Sesame';
+    this.maze = null;
+    this.pacman = new Pacman();
+    this.ghosts = [];
+    this.frame = 0;
+    this.dotsTotal = 0;
+    this.dotsEaten = 0;
+    this.ghostsEatenCombo = 0;
+    this.modeTimer = 0;
+    this.globalMode = GHOST_MODE.SCATTER;
+    this.modeWave = 0;
+    this.readyTimer = 0;
+    this.deathTimer = 0;
+    this.levelCompleteTimer = 0;
+    this.bonusItem = null;
+    this.bonusTimer = 0;
+    this.scorePopups = [];
+    this.creditsScrollY = 0;
+    this.fadeAlpha = 0;
+    this.fadeDir = 0;
+    this.fadeCallback = null;
+
+    // Win screen animation
+    this.winTweetIndex = 0;
+    this.winAnimTimer = 0;
+
+    this.setupClickHandler();
+  }
+
+  setupClickHandler() {
+    input.onClickOrTap((x, y) => {
+      sound.init();
+      switch (this.state) {
+        case STATE.SPLASH:
+          this.fadeTo(STATE.EXPLAINER);
+          break;
+        case STATE.EXPLAINER:
+          // Bottom 60px = skip to credits, rest = play
+          if (y > CANVAS_H - 60) {
+            this.fadeTo(STATE.WIN);
+            this.winTweetIndex = 0;
+            this.winAnimTimer = 0;
+          } else {
+            this.startLevel();
+          }
+          break;
+        case STATE.GAME_OVER:
+          this.state = STATE.SPLASH;
+          break;
+        case STATE.WIN:
+          this.fadeTo(STATE.CREDITS);
+          this.creditsScrollY = CANVAS_H;
+          break;
+        case STATE.CREDITS:
+          // Skip credits
+          this.fadeTo(STATE.END);
+          break;
+        case STATE.END:
+          // Play again
+          this.score = 0;
+          this.lives = 3;
+          this.level = 1;
+          this.fadeTo(STATE.SPLASH);
+          break;
+      }
+    });
+  }
+
+  fadeTo(newState) {
+    if (this.fadeDir !== 0) return;
+    this.fadeDir = 1;
+    this.fadeAlpha = 0;
+    this.fadeCallback = () => {
+      this.state = newState;
+      this.fadeDir = -1;
+    };
+  }
+
+  startLevel() {
+    this.maze = parseMaze(MAZE_STRINGS);
+    this.pacman.reset();
+    this.dotsTotal = 0;
+    this.dotsEaten = 0;
+    this.ghostsEatenCombo = 0;
+    this.modeWave = 0;
+    this.modeTimer = 0;
+    this.globalMode = GHOST_MODE.SCATTER;
+    this.bonusItem = null;
+    this.bonusTimer = 0;
+    this.scorePopups = [];
+
+    // Count dots
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (this.maze[r][c] === T.DOT || this.maze[r][c] === T.POWER) this.dotsTotal++;
+      }
+    }
+
+    // Create ghosts
+    this.ghosts = [
+      new Ghost('Confab', COLORS.ghostPink, { x: 19, y: 0 }, 10, 6),
+      new Ghost('Drift', COLORS.ghostPeach, { x: 1, y: 0 }, 11, 6),
+      new Ghost('Bias', COLORS.ghostMint, { x: 20, y: 16 }, 9, 6),
+      new Ghost('Psychosis', COLORS.ghostYellow, { x: 0, y: 16 }, 12, 6),
+    ];
+
+    // Confab starts outside immediately
+    this.ghosts[0].mode = GHOST_MODE.LEAVING;
+    // Others leave after dot counts
+    this.ghosts[1].dotLimit = 0;
+    this.ghosts[1].mode = GHOST_MODE.HOUSE;
+    this.ghosts[2].dotLimit = 30;
+    this.ghosts[2].mode = GHOST_MODE.HOUSE;
+    this.ghosts[3].dotLimit = 60;
+    this.ghosts[3].mode = GHOST_MODE.HOUSE;
+
+    // Difficulty scaling
+    const speedMultiplier = 0.55; // Level 1 (easy)
+    this.ghosts.forEach(g => {
+      g.baseSpeed = 1.5 * speedMultiplier;
+      g.speed = g.baseSpeed;
+    });
+
+    this.readyTimer = 120; // 2 seconds
+    this.state = STATE.READY;
+    sound.play('start');
+  }
+
+  resetAfterDeath() {
+    this.pacman.reset();
+    this.ghosts.forEach(g => g.reset());
+    this.ghosts[0].mode = GHOST_MODE.LEAVING;
+    this.globalMode = GHOST_MODE.SCATTER;
+    this.modeWave = 0;
+    this.modeTimer = 0;
+    this.readyTimer = 90;
+    this.state = STATE.READY;
+  }
+
+  update() {
+    this.frame++;
+
+    // Handle fade
+    if (this.fadeDir !== 0) {
+      this.fadeAlpha += this.fadeDir * 0.05;
+      if (this.fadeAlpha >= 1 && this.fadeDir === 1) {
+        this.fadeAlpha = 1;
+        if (this.fadeCallback) {
+          this.fadeCallback();
+          this.fadeCallback = null;
+        }
+      }
+      if (this.fadeAlpha <= 0 && this.fadeDir === -1) {
+        this.fadeAlpha = 0;
+        this.fadeDir = 0;
+      }
+      return;
+    }
+
+    switch (this.state) {
+      case STATE.LOGO:
+        this.logoTimer--;
+        if (this.logoTimer <= 0) {
+          this.state = STATE.SPLASH;
+        }
+        break;
+
+      case STATE.READY:
+        this.readyTimer--;
+        if (this.readyTimer <= 0) {
+          this.state = STATE.PLAYING;
+        }
+        break;
+
+      case STATE.PLAYING:
+        this.updatePlaying();
+        break;
+
+      case STATE.PACMAN_DEATH:
+        this.deathTimer++;
+        this.pacman.update(this.maze);
+        if (this.deathTimer > 90) {
+          if (this.lives > 0) {
+            this.resetAfterDeath();
+          } else {
+            this.state = STATE.GAME_OVER;
+          }
+        }
+        break;
+
+      case STATE.LEVEL_COMPLETE:
+        this.levelCompleteTimer++;
+        if (this.levelCompleteTimer > 120) {
+          // Only 1 level for now — go to win
+          this.fadeTo(STATE.WIN);
+          this.winTweetIndex = 0;
+          this.winAnimTimer = 0;
+        }
+        break;
+
+      case STATE.WIN:
+        this.winAnimTimer++;
+        if (this.winAnimTimer % 60 === 0 && this.winTweetIndex < 4) {
+          this.winTweetIndex++;
+        }
+        break;
+
+      case STATE.CREDITS:
+        this.creditsScrollY -= 1;
+        if (this.creditsScrollY < -600) {
+          this.fadeTo(STATE.END);
+        }
+        break;
+    }
+  }
+
+  updatePlaying() {
+    // Update mode timer (scatter/chase waves)
+    this.modeTimer++;
+    const waves = [
+      { mode: GHOST_MODE.SCATTER, duration: 420 },  // 7s
+      { mode: GHOST_MODE.CHASE, duration: 1200 },    // 20s
+      { mode: GHOST_MODE.SCATTER, duration: 420 },
+      { mode: GHOST_MODE.CHASE, duration: 1200 },
+      { mode: GHOST_MODE.SCATTER, duration: 300 },   // 5s
+      { mode: GHOST_MODE.CHASE, duration: 1200 },
+      { mode: GHOST_MODE.SCATTER, duration: 300 },
+      { mode: GHOST_MODE.CHASE, duration: 99999 },   // permanent
+    ];
+    if (this.modeWave < waves.length && this.modeTimer >= waves[this.modeWave].duration) {
+      this.modeTimer = 0;
+      this.globalMode = waves[this.modeWave].mode;
+      this.modeWave++;
+      // Update non-frightened ghosts
+      this.ghosts.forEach(g => {
+        if (g.mode === GHOST_MODE.SCATTER || g.mode === GHOST_MODE.CHASE) {
+          g.mode = this.globalMode;
+          g.direction = OPPOSITE[g.direction] || g.direction;
+        }
+      });
+    }
+
+    // Release ghosts from house based on dots eaten
+    this.ghosts.forEach(g => {
+      if (g.mode === GHOST_MODE.HOUSE && this.dotsEaten >= g.dotLimit) {
+        g.mode = GHOST_MODE.LEAVING;
+      }
+    });
+
+    // Update pacman
+    this.pacman.update(this.maze);
+
+    // Check dot collection
+    const pt = this.maze[this.pacman.tileY] && this.maze[this.pacman.tileY][this.pacman.tileX];
+    if (pt === T.DOT) {
+      this.maze[this.pacman.tileY][this.pacman.tileX] = T.EMPTY;
+      this.score += 10;
+      this.dotsEaten++;
+      if (this.frame % 2 === 0) sound.play('chomp');
+    } else if (pt === T.POWER) {
+      this.maze[this.pacman.tileY][this.pacman.tileX] = T.EMPTY;
+      this.score += 50;
+      this.dotsEaten++;
+      this.ghostsEatenCombo = 0;
+      this.ghosts.forEach(g => g.setFrightened());
+      sound.play('power');
+    }
+
+    // Bonus item
+    if (!this.bonusItem && (this.dotsEaten === 70 || this.dotsEaten === 170)) {
+      this.bonusItem = { x: 10, y: 9, timer: 540 }; // 9 seconds
+    }
+    if (this.bonusItem) {
+      this.bonusItem.timer--;
+      if (this.bonusItem.timer <= 0) this.bonusItem = null;
+      else if (this.pacman.tileX === this.bonusItem.x && this.pacman.tileY === this.bonusItem.y) {
+        this.score += 100;
+        this.addScorePopup(this.bonusItem.x * TILE + TILE/2, this.bonusItem.y * TILE + TILE/2 + HUD_TOP, 100);
+        this.bonusItem = null;
+        sound.play('eatghost');
+      }
+    }
+
+    // Update ghosts
+    const blinky = this.ghosts[0];
+    this.ghosts.forEach(g => g.update(this.maze, this.pacman, blinky, this.globalMode));
+
+    // Check ghost collisions
+    for (const g of this.ghosts) {
+      if (g.mode === GHOST_MODE.HOUSE || g.mode === GHOST_MODE.LEAVING || g.mode === GHOST_MODE.EATEN) continue;
+      const dist = Math.sqrt((this.pacman.pixelX - g.pixelX)**2 + (this.pacman.pixelY - g.pixelY)**2);
+      if (dist < TILE * 0.8) {
+        if (g.mode === GHOST_MODE.FRIGHTENED) {
+          // Eat ghost
+          g.mode = GHOST_MODE.EATEN;
+          this.ghostsEatenCombo++;
+          const pts = 200 * Math.pow(2, this.ghostsEatenCombo - 1);
+          this.score += pts;
+          this.addScorePopup(g.pixelX, g.pixelY + HUD_TOP, pts);
+          sound.play('eatghost');
+        } else {
+          // Pacman dies
+          this.pacman.alive = false;
+          this.pacman.deathFrame = 0;
+          this.lives--;
+          this.deathTimer = 0;
+          this.state = STATE.PACMAN_DEATH;
+          sound.play('death');
+          break;
+        }
+      }
+    }
+
+    // Check level complete
+    if (this.dotsEaten >= this.dotsTotal) {
+      this.state = STATE.LEVEL_COMPLETE;
+      this.levelCompleteTimer = 0;
+      sound.play('levelcomplete');
+    }
+
+    // Update high score
+    if (this.score > this.highScore) {
+      this.highScore = this.score;
+      localStorage.setItem('pacmanNTC_high', String(this.highScore));
+    }
+
+    // Update score popups
+    this.scorePopups = this.scorePopups.filter(p => {
+      p.y -= 0.5;
+      p.timer--;
+      return p.timer > 0;
+    });
+  }
+
+  addScorePopup(x, y, points) {
+    this.scorePopups.push({ x, y, points, timer: 60 });
+  }
+
+  // ==========================================
+  // RENDERING
+  // ==========================================
+  render() {
+    ctx.fillStyle = COLORS.background;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    switch (this.state) {
+      case STATE.LOGO: this.renderLogo(); break;
+      case STATE.SPLASH: this.renderSplash(); break;
+      case STATE.EXPLAINER: this.renderExplainer(); break;
+      case STATE.READY:
+      case STATE.PLAYING:
+      case STATE.PACMAN_DEATH:
+      case STATE.LEVEL_COMPLETE:
+        this.renderGameplay();
+        break;
+      case STATE.GAME_OVER: this.renderGameOver(); break;
+      case STATE.WIN: this.renderWin(); break;
+      case STATE.CREDITS: this.renderCredits(); break;
+      case STATE.END: this.renderEnd(); break;
+    }
+
+    // Fade overlay
+    if (this.fadeAlpha > 0) {
+      ctx.fillStyle = `rgba(0,0,0,${this.fadeAlpha})`;
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    }
+  }
+
+  renderLogo() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    if (logoImg.complete && logoImg.naturalWidth > 0) {
+      // Scale image to fit canvas while maintaining aspect ratio
+      const imgAspect = logoImg.naturalWidth / logoImg.naturalHeight;
+      const canvasAspect = CANVAS_W / CANVAS_H;
+      let drawW, drawH;
+      if (imgAspect > canvasAspect) {
+        drawW = CANVAS_W * 0.8;
+        drawH = drawW / imgAspect;
+      } else {
+        drawH = CANVAS_H * 0.7;
+        drawW = drawH * imgAspect;
+      }
+      const drawX = (CANVAS_W - drawW) / 2;
+      const drawY = (CANVAS_H - drawH) / 2;
+      // Smooth fade: full opacity for first 2s (120 frames), then fade over remaining 3s (180 frames)
+      const fadeStart = 180; // start fading when timer hits this
+      if (this.logoTimer < fadeStart) {
+        ctx.globalAlpha = this.logoTimer / fadeStart;
+      }
+      ctx.drawImage(logoImg, drawX, drawY, drawW, drawH);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  renderSplash() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Title
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = '12px "Press Start 2P"';
+    ctx.fillText('PACMAN', CANVAS_W / 2, CANVAS_H / 2 - 100);
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillText('Nine Treasures Creamery', CANVAS_W / 2, CANVAS_H / 2 - 60);
+    ctx.fillText('x OpenAI Edition', CANVAS_W / 2, CANVAS_H / 2 - 40);
+
+    // Draw Pacman sprite
+    Sprites.drawPacman(ctx, CANVAS_W/2, CANVAS_H/2 + 10, 40, DIR.RIGHT, 0.3);
+
+    // Draw ghosts
+    const ghostColors = [COLORS.ghostPink, COLORS.ghostPeach, COLORS.ghostMint, COLORS.ghostYellow];
+    ghostColors.forEach((c, i) => {
+      Sprites.drawGhost(ctx, CANVAS_W/2 - 75 + i * 50, CANVAS_H/2 + 70, 20, c, GHOST_MODE.CHASE, DIR.LEFT, this.frame);
+    });
+
+    // Start button
+    const pulse = 1 + 0.05 * Math.sin(this.frame * 0.08);
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = `${Math.round(14 * pulse)}px "Press Start 2P"`;
+    ctx.fillText('TAP TO START', CANVAS_W / 2, CANVAS_H / 2 + 140);
+  }
+
+  renderExplainer() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const cy = CANVAS_H / 2;
+
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = '9px "Press Start 2P"';
+    ctx.fillText('HOW TO PLAY', CANVAS_W / 2, cy - 120);
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '6px "Press Start 2P"';
+    ctx.fillText('Eat all tokens to clear', CANVAS_W / 2, cy - 80);
+    ctx.fillText('each level.', CANVAS_W / 2, cy - 64);
+
+    // Sparkle icon + label
+    Sprites.drawSparkle(ctx, CANVAS_W/2 - 80, cy - 32, 16, this.frame);
+    ctx.fillStyle = '#AAA';
+    ctx.font = '6px "Press Start 2P"';
+    ctx.textAlign = 'left';
+    ctx.fillText('AGI Power Pill', CANVAS_W/2 - 56, cy - 32);
+
+    // Ghost icon + label
+    ctx.textAlign = 'center';
+    Sprites.drawGhost(ctx, CANVAS_W/2 - 80, cy + 2, 14, COLORS.ghostPink, GHOST_MODE.CHASE, DIR.LEFT, this.frame);
+    ctx.textAlign = 'left';
+    ctx.fillText('Hallucination', CANVAS_W/2 - 56, cy + 2);
+
+    // Controls
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#666';
+    ctx.font = '5px "Press Start 2P"';
+    ctx.fillText('Swipe or Arrow Keys', CANVAS_W/2, cy + 50);
+
+    // Play button
+    const pulse = 1 + 0.05 * Math.sin(this.frame * 0.08);
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = `${Math.round(10 * pulse)}px "Press Start 2P"`;
+    ctx.fillText('TAP TO PLAY', CANVAS_W / 2, cy + 100);
+
+    // Skip to credits link
+    ctx.fillStyle = '#555';
+    ctx.font = '5px "Press Start 2P"';
+    ctx.fillText('skip to credits >', CANVAS_W / 2, CANVAS_H - 30);
+  }
+
+  renderGameplay() {
+    // Draw maze
+    drawMaze(ctx, this.maze, this.frame);
+
+    // Draw bonus item
+    if (this.bonusItem) {
+      Sprites.drawIceCream(
+        ctx,
+        this.bonusItem.x * TILE + TILE/2,
+        this.bonusItem.y * TILE + TILE/2 + HUD_TOP,
+        TILE, '#333333' // Black sesame color
+      );
+    }
+
+    // Draw pacman
+    this.pacman.draw(ctx);
+
+    // Draw ghosts
+    this.ghosts.forEach(g => g.draw(ctx));
+
+    // Score popups
+    this.scorePopups.forEach(p => {
+      ctx.save();
+      ctx.globalAlpha = p.timer / 60;
+      ctx.fillStyle = COLORS.textCyan;
+      ctx.font = '7px "Press Start 2P"';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(p.points), p.x, p.y);
+      ctx.restore();
+    });
+
+    // HUD
+    this.renderHUD();
+
+    // Ready overlay
+    if (this.state === STATE.READY) {
+      ctx.fillStyle = '#FFD700';
+      ctx.font = '12px "Press Start 2P"';
+      ctx.textAlign = 'center';
+      ctx.fillText('READY!', CANVAS_W / 2, CANVAS_H / 2 + 20);
+      ctx.fillStyle = COLORS.text;
+      ctx.font = '8px "Press Start 2P"';
+      ctx.fillText(this.levelName, CANVAS_W / 2, CANVAS_H / 2 + 50);
+    }
+
+    // Level complete flash
+    if (this.state === STATE.LEVEL_COMPLETE) {
+      if (Math.floor(this.levelCompleteTimer / 15) % 2 === 0) {
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      }
+    }
+  }
+
+  renderHUD() {
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '8px "Press Start 2P"';
+
+    // Score
+    ctx.fillText('SCORE', 8, 6);
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.fillText(String(this.score).padStart(6, '0'), 8, 20);
+
+    // High score
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = 'center';
+    ctx.fillText('HIGH', CANVAS_W / 2, 6);
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.fillText(String(this.highScore).padStart(6, '0'), CANVAS_W / 2, 20);
+
+    // Level
+    ctx.fillStyle = COLORS.text;
+    ctx.textAlign = 'right';
+    ctx.fillText('LVL ' + this.level, CANVAS_W - 8, 6);
+    ctx.fillStyle = '#DDD';
+    ctx.font = '6px "Press Start 2P"';
+    ctx.fillText(this.levelName, CANVAS_W - 8, 22);
+
+    // Lives (bottom)
+    for (let i = 0; i < this.lives; i++) {
+      Sprites.drawPacman(ctx, 20 + i * 24, CANVAS_H - 20, 14, DIR.RIGHT, 0.3);
+    }
+
+    // Mute button
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#666';
+    ctx.font = '7px "Press Start 2P"';
+    ctx.fillText(sound.muted ? 'MUTE' : 'SND', CANVAS_W - 8, CANVAS_H - 24);
+  }
+
+  renderGameOver() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#FF0000';
+    ctx.font = '16px "Press Start 2P"';
+    ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 20);
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillText('SCORE: ' + this.score, CANVAS_W / 2, CANVAS_H / 2 + 30);
+
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = '8px "Press Start 2P"';
+    const pulse = 0.5 + 0.5 * Math.sin(this.frame * 0.08);
+    ctx.globalAlpha = pulse;
+    ctx.fillText('TAP TO CONTINUE', CANVAS_W / 2, CANVAS_H / 2 + 80);
+    ctx.globalAlpha = 1;
+  }
+
+  renderWin() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Dark "twitter" background
+    ctx.fillStyle = '#15202B';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Header
+    ctx.fillStyle = '#1DA1F2';
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillText('BREAKING NEWS', CANVAS_W / 2, 40);
+
+    // Sam Altman tweet
+    if (this.winTweetIndex >= 0) {
+      this.drawTweet(ctx, 40, 70, '@sama', 'Sam Altman', 'agi has been achieved', '❤️', '#FF6B6B');
+    }
+
+    // Reply tweets
+    const replies = [
+      { handle: '@tszzl', name: 'roon', text: '❤️' },
+      { handle: '@gaborcselle', name: 'Gabor Cselle', text: '❤️' },
+      { handle: '@OfficialLoganK', name: 'Logan K', text: '❤️' },
+    ];
+    replies.forEach((r, i) => {
+      if (this.winTweetIndex > i) {
+        this.drawTweet(ctx, 40, 200 + i * 100, r.handle, r.name, r.text, '', '#FF6B6B');
+      }
+    });
+
+    // Continue prompt
+    if (this.winTweetIndex >= 4) {
+      ctx.fillStyle = COLORS.textCyan;
+      ctx.font = '8px "Press Start 2P"';
+      const pulse = 0.5 + 0.5 * Math.sin(this.frame * 0.08);
+      ctx.globalAlpha = pulse;
+      ctx.fillText('TAP TO CONTINUE', CANVAS_W / 2, CANVAS_H - 40);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  drawTweet(ctx, x, y, handle, name, text, emoji, emojiColor) {
+    // Card background
+    ctx.fillStyle = '#192734';
+    const cardW = CANVAS_W - 80;
+    ctx.fillRect(x, y, cardW, 80);
+
+    // Profile pic placeholder
+    ctx.fillStyle = '#AAA';
+    ctx.beginPath();
+    ctx.arc(x + 24, y + 24, 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Name and handle
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#FFF';
+    ctx.font = '7px "Press Start 2P"';
+    ctx.fillText(name, x + 46, y + 16);
+    ctx.fillStyle = '#8899A6';
+    ctx.font = '6px "Press Start 2P"';
+    ctx.fillText(handle, x + 46, y + 30);
+
+    // Tweet text
+    ctx.fillStyle = '#FFF';
+    ctx.font = '7px "Press Start 2P"';
+    ctx.fillText(text, x + 20, y + 58);
+
+    // Emoji
+    if (emoji) {
+      ctx.fillStyle = emojiColor || '#FFF';
+      ctx.font = '10px "Press Start 2P"';
+      ctx.textAlign = 'right';
+      ctx.fillText(emoji, x + cardW - 10, y + 58);
+    }
+  }
+
+  renderCredits() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const y = this.creditsScrollY;
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '12px "Press Start 2P"';
+    ctx.fillText('HALLUCINATIONS', CANVAS_W / 2, y);
+
+    const ghostData = [
+      { name: 'CONFAB', color: COLORS.ghostPink },
+      { name: 'DRIFT', color: COLORS.ghostPeach },
+      { name: 'BIAS', color: COLORS.ghostMint },
+      { name: 'PSYCHOSIS', color: COLORS.ghostYellow },
+    ];
+
+    ghostData.forEach((g, i) => {
+      const gy = y + 60 + i * 80;
+      Sprites.drawGhost(ctx, CANVAS_W / 2 - 60, gy, 24, g.color, GHOST_MODE.CHASE, DIR.RIGHT, this.frame);
+      ctx.fillStyle = g.color;
+      ctx.font = '10px "Press Start 2P"';
+      ctx.fillText(g.name, CANVAS_W / 2 + 30, gy);
+    });
+
+    // Divider
+    ctx.fillStyle = '#444';
+    ctx.fillRect(80, y + 400, CANVAS_W - 160, 2);
+
+    // Made with Codex
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillText('Made with Codex', CANVAS_W / 2, y + 460);
+
+    // Nine Treasures Creamery
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '7px "Press Start 2P"';
+    ctx.fillText('Nine Treasures Creamery', CANVAS_W / 2, y + 510);
+    ctx.fillText('x OpenAI', CANVAS_W / 2, y + 535);
+  }
+
+  renderEnd() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '20px "Press Start 2P"';
+    ctx.fillText('THE END', CANVAS_W / 2, CANVAS_H / 2 - 30);
+
+    ctx.fillStyle = COLORS.textCyan;
+    ctx.font = '10px "Press Start 2P"';
+    const pulse = 0.5 + 0.5 * Math.sin(this.frame * 0.08);
+    ctx.globalAlpha = pulse;
+    ctx.fillText('PLAY AGAIN', CANVAS_W / 2, CANVAS_H / 2 + 40);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ==========================================
+// MAIN GAME LOOP
+// ==========================================
+const game = new Game();
+let lastTime = 0;
+let accumulator = 0;
+
+function gameLoop(timestamp) {
+  const dt = timestamp - lastTime;
+  lastTime = timestamp;
+  accumulator += dt;
+
+  while (accumulator >= FRAME_TIME) {
+    game.update();
+    accumulator -= FRAME_TIME;
+  }
+
+  game.render();
+  requestAnimationFrame(gameLoop);
+}
+
+// Wait for font to load, then start
+document.fonts.ready.then(() => {
+  requestAnimationFrame(gameLoop);
+});
+</script>
+</body>
+</html>
